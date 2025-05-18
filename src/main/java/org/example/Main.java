@@ -3,14 +3,14 @@ package org.example;
 import org.joml.*;
 import org.lwjgl.glfw.*;
 import org.lwjgl.opengl.*;
-import static org.lwjgl.glfw.GLFW.*;
-import static org.lwjgl.opengl.GL11.*;  // for general OpenGL functions and constants
-import static org.lwjgl.opengl.GL13C.GL_TEXTURE0;
-import static org.lwjgl.opengl.GL13C.glActiveTexture;
-import org.joml.Math;
+
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
+
+import static org.lwjgl.glfw.GLFW.*;
+import static org.lwjgl.opengl.GL11C.*;
+import static org.lwjgl.opengl.GL13C.*;
 
 public class Main {
     private long window;
@@ -22,20 +22,19 @@ public class Main {
     private World world;
     private Map<Long, ChunkMesh> chunkMeshes = new HashMap<>();
 
-    private Camera camera;
-    private float lastX = width / 2.0f;
-    private float lastY = height / 2.0f;
-    private boolean firstMouse = true;
+    private Vector3f cameraPos = new Vector3f(8, 20, 20);
+    private Vector3f cameraFront = new Vector3f(0, -0.5f, -1).normalize();
+    private Vector3f cameraUp = new Vector3f(0, 1, 0);
 
-    private double lastTime;
-    private float deltaTime;
-
-    // Movement keys state
-    private boolean forward, backward, left, right;
+    private GLFWWindowSizeCallback windowSizeCallback;
 
     public void run() throws IOException {
         init();
         loop();
+
+        if (windowSizeCallback != null) {
+            windowSizeCallback.free();
+        }
 
         glfwDestroyWindow(window);
         glfwTerminate();
@@ -45,136 +44,76 @@ public class Main {
     private void init() throws IOException {
         GLFWErrorCallback.createPrint(System.err).set();
 
-        if (!glfwInit())
+        if (!glfwInit()) {
             throw new IllegalStateException("Unable to initialize GLFW");
+        }
 
         glfwDefaultWindowHints();
         glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
         glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
 
         window = glfwCreateWindow(width, height, "Voxel World", 0, 0);
-        if (window == 0)
-            throw new RuntimeException("Failed to create GLFW window");
+        if (window == 0) {
+            throw new RuntimeException("Failed to create the GLFW window");
+        }
 
         glfwMakeContextCurrent(window);
         glfwSwapInterval(1);
         glfwShowWindow(window);
 
+        // Setup resize callback to update viewport and window size
+        windowSizeCallback = new GLFWWindowSizeCallback() {
+            @Override
+            public void invoke(long window, int newWidth, int newHeight) {
+                width = newWidth;
+                height = newHeight;
+                glViewport(0, 0, width, height);
+            }
+        };
+        glfwSetWindowSizeCallback(window, windowSizeCallback);
+
         GL.createCapabilities();
-        glEnable(GL11.GL_DEPTH_TEST);
-        glClearColor(0.5f, 0.7f, 1.0f, 1.0f);
-
-        // Setup viewport
-        glViewport(0, 0, width, height);
-
-        // Setup callbacks
-        setupCallbacks();
+        glClearColor(0.5f, 0.7f, 1.0f, 1.0f); // light sky blue background
 
         shaderProgram = new ShaderProgram("src/main/resources/shaders/vertex.glsl", "src/main/resources/shaders/fragment.glsl");
         grassTexture = new Texture("src/main/resources/textures/grass.png");
 
-        world = new World(16, 128, 16);
+        world = new World(16, 8, 16); // Adjusted height to 8 chunks for example
+
         for (int cx = -1; cx <= 1; cx++) {
             for (int cz = -1; cz <= 1; cz++) {
-                Chunk chunk = world.getChunk(cx, 0, cz);
-                ChunkMesh mesh = new ChunkMesh(chunk);
-                chunkMeshes.put(getChunkKey(cx, 0, cz), mesh);
+                Chunk chunk = world.getChunk(cx + 8, 0, cz + 8); // offset to center if needed
+                if (chunk != null) {
+                    ChunkMesh mesh = new ChunkMesh(chunk);
+                    chunkMeshes.put(getChunkKey(chunk.chunkX, chunk.chunkY, chunk.chunkZ), mesh);
+                }
             }
         }
 
-        camera = new Camera(new Vector3f(8, 20, 20));
+        // Set spawn point on terrain at chunk (0,0)
+        int spawnChunkX = 0;
+        int spawnChunkZ = 0;
+        int spawnHeight = world.generateHeight(spawnChunkX, spawnChunkZ);
+        cameraPos.set(8, spawnHeight + 2, 8); // spawn slightly above ground
+        cameraFront.set(0, -0.5f, -1).normalize();
+        cameraUp.set(0, 1, 0);
 
-        lastTime = glfwGetTime();
-
-        // Capture the mouse
-        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-    }
-
-    private void setupCallbacks() {
-        // Window resize callback
-        glfwSetFramebufferSizeCallback(window, (window, w, h) -> {
-            width = w;
-            height = h;
-            glViewport(0, 0, width, height);
-        });
-
-        // Mouse position callback for mouse look
-        glfwSetCursorPosCallback(window, (window, xpos, ypos) -> {
-            if (firstMouse) {
-                lastX = (float) xpos;
-                lastY = (float) ypos;
-                firstMouse = false;
-            }
-
-            float xoffset = (float) xpos - lastX;
-            float yoffset = lastY - (float) ypos; // reversed: y ranges bottom to top
-
-            lastX = (float) xpos;
-            lastY = (float) ypos;
-
-            float sensitivity = 0.1f;
-            xoffset *= sensitivity;
-            yoffset *= sensitivity;
-
-            camera.yaw += xoffset;
-            camera.pitch += yoffset;
-
-            // Constrain pitch
-            if (camera.pitch > 89.0f)
-                camera.pitch = 89.0f;
-            if (camera.pitch < -89.0f)
-                camera.pitch = -89.0f;
-        });
-
-        // Keyboard input callback
-        glfwSetKeyCallback(window, (window, key, scancode, action, mods) -> {
-            boolean pressed = action != GLFW_RELEASE;
-            switch (key) {
-                case GLFW_KEY_W -> forward = pressed;
-                case GLFW_KEY_S -> backward = pressed;
-                case GLFW_KEY_A -> left = pressed;
-                case GLFW_KEY_D -> right = pressed;
-                case GLFW_KEY_ESCAPE -> {
-                    if (pressed)
-                        glfwSetWindowShouldClose(window, true);
-                }
-            }
-        });
-    }
-
-    private void processInput() {
-        Vector3f front = camera.getFront();
-        Vector3f rightVec = camera.getRight();
-
-        float cameraSpeed = 10.0f * deltaTime; // adjust speed as needed
-
-        if (forward)
-            camera.position.fma(cameraSpeed, front);
-        if (backward)
-            camera.position.fma(-cameraSpeed, front);
-        if (left)
-            camera.position.fma(-cameraSpeed, rightVec);
-        if (right)
-            camera.position.fma(cameraSpeed, rightVec);
+        glEnable(GL_DEPTH_TEST);
+        glViewport(0, 0, width, height);
     }
 
     private void loop() {
         while (!glfwWindowShouldClose(window)) {
-            double currentTime = glfwGetTime();
-            deltaTime = (float) (currentTime - lastTime);
-            lastTime = currentTime;
-
-            processInput();
-
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-            Matrix4f projection = new Matrix4f().perspective((float) Math.toRadians(70.0f), (float) width / height, 0.1f, 1000.0f);
-            Matrix4f view = camera.getViewMatrix();
+            Matrix4f projection = new Matrix4f().perspective(org.joml.Math.toRadians(70.0f), (float) width / height, 0.1f, 1000.0f);
+            Matrix4f view = new Matrix4f().lookAt(cameraPos, new Vector3f(cameraPos).add(cameraFront), cameraUp);
 
             shaderProgram.use();
             shaderProgram.setUniform1i("textureSampler", 0);
 
-            for (ChunkMesh mesh : chunkMeshes.values()) {
+            for (Map.Entry<Long, ChunkMesh> entry : chunkMeshes.entrySet()) {
+                ChunkMesh mesh = entry.getValue();
                 Chunk chunk = mesh.getChunk();
 
                 Matrix4f model = new Matrix4f().translate(chunk.chunkX * chunk.width, chunk.chunkY * chunk.height, chunk.chunkZ * chunk.depth);
